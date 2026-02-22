@@ -26,6 +26,7 @@ is_seeking = {}
 is_processing = {}
 saved_playlists = {}
 now_playing_messages = {}
+history_queues = {}
 
 YTDL_OPTIONS = {
     'format': 'bestaudio/best',
@@ -115,6 +116,71 @@ async def fetch_missing_titles(tracks):
                     await asyncio.sleep(0.3) 
                 except Exception:
                     pass
+class PlaybackView(discord.ui.View):
+    def __init__(self, ctx):
+        super().__init__(timeout=None)
+        self.ctx = ctx
+
+    @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.gray)
+    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_id = self.ctx.guild.id
+        if guild_id not in history_queues or not history_queues[guild_id]:
+            return await interaction.response.send_message("История пуста!", ephemeral=True)
+
+        prev_track = history_queues[guild_id].pop()
+        current = current_tracks.get(guild_id)
+        if current:
+            queues[guild_id].insert(0, current)
+        
+        queues[guild_id].insert(0, prev_track)
+        
+        await interaction.response.defer()
+        self.ctx.voice_client.stop()
+
+    @discord.ui.button(emoji="⏯️", style=discord.ButtonStyle.blurple)
+    async def play_pause_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.ctx.voice_client: return
+            
+        if self.ctx.voice_client.is_playing():
+            self.ctx.voice_client.pause()
+            await interaction.response.send_message("⏸️ Пауза", ephemeral=True)
+        elif self.ctx.voice_client.is_paused():
+            self.ctx.voice_client.resume()
+            await interaction.response.send_message("▶️ Продолжаем", ephemeral=True)
+
+    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.gray)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.ctx.voice_client and (self.ctx.voice_client.is_playing() or self.ctx.voice_client.is_paused()):
+            await interaction.response.defer()
+            self.ctx.voice_client.stop()
+        else:
+            await interaction.response.send_message("Ничего не играет.", ephemeral=True)
+
+    @discord.ui.button(emoji="🔀", style=discord.ButtonStyle.gray)
+    async def shuffle_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_id = self.ctx.guild.id
+        if guild_id in queues and len(queues[guild_id]) > 1:
+            random.shuffle(queues[guild_id])
+            await interaction.response.send_message("🔀 Очередь перемешана!", ephemeral=True)
+        else:
+            await interaction.response.send_message("Недостаточно треков для перемешивания.", ephemeral=True)
+
+    @discord.ui.button(emoji="📋", style=discord.ButtonStyle.gray)
+    async def queue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Вызываем логику команды !queue
+        guild_id = self.ctx.guild.id
+        playing_now = current_tracks.get(guild_id)
+        queue_list = queues.get(guild_id, [])
+
+        if not playing_now and not queue_list:
+            return await interaction.response.send_message("Очередь пуста.", ephemeral=True)
+
+        view = QueueView(queue_list, playing_now, self.ctx)
+        embed = view.create_embed()
+        
+        # Отправляем очередь отдельным эфемерным сообщением (видимым только тебе)
+        # или обычным сообщением. Давай сделаем обычным, чтобы все видели.
+        await interaction.response.send_message(embed=embed, view=view if view.total_pages > 1 else None)
 
 # --- 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def get_server_settings(guild_id):
@@ -148,6 +214,13 @@ async def play_next(ctx, error=None):
         is_seeking[guild_id] = False 
     else:
         if guild_id in queues and len(queues[guild_id]) > 0:
+            # ПЕРЕД тем как достать новый, сохраняем старый в историю
+            old_track = current_tracks.get(guild_id)
+            if old_track:
+                if guild_id not in history_queues: history_queues[guild_id] = []
+                history_queues[guild_id].append(old_track)
+                if len(history_queues[guild_id]) > 50: history_queues[guild_id].pop(0)
+
             track = queues[guild_id].pop(0)
             current_tracks[guild_id] = track
             seek_offset = 0 
@@ -200,19 +273,17 @@ async def play_next(ctx, error=None):
                 color=discord.Color.green()
             )
             
+            # Создаем нашу новую панель с 5 кнопками
+            view = PlaybackView(ctx) 
+            
             old_message = now_playing_messages.get(guild_id)
             if old_message:
                 try:
-                    # Пытаемся изменить старое сообщение
-                    await old_message.edit(embed=embed)
-                except discord.NotFound:
-                    # Если кто-то случайно удалил сообщение бота в Дискорде, отправляем новое
-                    now_playing_messages[guild_id] = await ctx.send(embed=embed)
-                except Exception as e:
-                    print(f"Не удалось изменить сообщение: {e}")
+                    await old_message.edit(embed=embed, view=view)
+                except:
+                    now_playing_messages[guild_id] = await ctx.send(embed=embed, view=view)
             else:
-                # Если это первый трек и старого сообщения еще нет
-                now_playing_messages[guild_id] = await ctx.send(embed=embed)
+                now_playing_messages[guild_id] = await ctx.send(embed=embed, view=view)
             
     except Exception as e:
         print(f"Ошибка при попытке играть: {e}")

@@ -27,6 +27,7 @@ is_processing = {}
 saved_playlists = {}
 now_playing_messages = {}
 history_queues = {}
+loop_mode = {}
 
 YTDL_OPTIONS = {
     'format': 'bestaudio/best',
@@ -210,14 +211,21 @@ async def play_next(ctx, error=None):
         seek_offset = playback_info[guild_id]['seek_offset']
         is_seeking[guild_id] = False 
     else:
-        if guild_id in queues and len(queues[guild_id]) > 0:
-            # ПЕРЕД тем как достать новый, сохраняем старый в историю
-            old_track = current_tracks.get(guild_id)
-            if old_track:
-                if guild_id not in history_queues: history_queues[guild_id] = []
-                history_queues[guild_id].append(old_track)
-                if len(history_queues[guild_id]) > 50: history_queues[guild_id].pop(0)
+        # 1. Вытаскиваем старый трек и сохраняем его в историю
+        old_track = current_tracks.get(guild_id)
+        if old_track:
+            if guild_id not in history_queues: history_queues[guild_id] = []
+            history_queues[guild_id].append(old_track)
+            if len(history_queues[guild_id]) > 50: history_queues[guild_id].pop(0)
+            
+            # ---> МАГИЯ: Возвращаем трек в конец очереди (если включен цикл)
+            # По умолчанию мы считаем, что цикл включен (True)
+            if loop_mode.get(guild_id, True): 
+                if guild_id not in queues: queues[guild_id] = []
+                queues[guild_id].append(old_track)
 
+        # 2. Берем следующий трек на воспроизведение
+        if guild_id in queues and len(queues[guild_id]) > 0:
             track = queues[guild_id].pop(0)
             current_tracks[guild_id] = track
             seek_offset = 0 
@@ -646,6 +654,18 @@ async def play_author(ctx, *, query: str):
     except Exception as e:
         print(f"Ошибка AUTHOR: {e}")
         await message.edit(embed=discord.Embed(description="❌ Произошел сбой.", color=discord.Color.red()))
+    
+@bot.command(aliases=['repeat'])
+async def loop(ctx):
+    """Включает или выключает бесконечный повтор очереди."""
+    guild_id = ctx.guild.id
+    
+    # Меняем текущее значение на противоположное (по умолчанию включено)
+    current_loop = loop_mode.get(guild_id, True)
+    loop_mode[guild_id] = not current_loop
+    
+    state = "✅ **Включен**" if loop_mode[guild_id] else "❌ **Выключен**"
+    await ctx.send(embed=discord.Embed(description=f"🔁 Бесконечный повтор очереди: {state}", color=discord.Color.blue()))
 
 # --- ЗАПУСК ---
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')

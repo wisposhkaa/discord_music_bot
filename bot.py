@@ -7,6 +7,7 @@ import time
 import urllib.parse
 import math
 import os
+import json
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -24,10 +25,44 @@ current_tracks = {}
 playback_info = {} 
 is_seeking = {}
 is_processing = {}
-saved_playlists = {}
 now_playing_messages = {}
 history_queues = {}
 loop_mode = {}
+
+SETTINGS_FILE = "server_settings.json"
+
+# Функция для загрузки настроек из файла
+def load_settings():
+    if os.path.exists(SETTINGS_FILE):
+        with open(SETTINGS_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+# Функция для сохранения настроек в файл
+def save_settings(data):
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
+# Загружаем настройки при старте бота
+persistent_settings = load_settings()
+
+PLAYLIST_HISTORY_FILE = "playlist_history.json"
+
+# Функция для загрузки истории плейлистов из файла
+def load_playlists():
+    if os.path.exists(PLAYLIST_HISTORY_FILE):
+        with open(PLAYLIST_HISTORY_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+# Функция для сохранения истории в файл
+def save_playlists(data):
+    with open(PLAYLIST_HISTORY_FILE, "w", encoding="utf-8") as f:
+        # ensure_ascii=False нужен, чтобы русские буквы сохранялись нормально
+        json.dump(data, f, indent=4, ensure_ascii=False)
+
+# Теперь вместо пустого словаря {} мы сразу загружаем данные из файла
+saved_playlists = load_playlists()
 
 YTDL_OPTIONS = {
     'format': 'bestaudio/best',
@@ -262,7 +297,16 @@ async def play_next(ctx, error=None):
             # Это решает проблему зависания и ошибок декодирования
             ffmpeg_params['before_options'] = f"-ss {int(seek_offset)} {FFMPEG_OPTIONS['before_options']}"
             
-        source = discord.FFmpegPCMAudio(real_url, executable="ffmpeg", **ffmpeg_params)
+        # Базовый источник звука
+        base_source = discord.FFmpegPCMAudio(real_url, executable="ffmpeg", **ffmpeg_params)
+        
+        # Достаем сохраненную громкость (по умолчанию 1.0, то есть 100%)
+        # JSON хранит ключи как строки, поэтому переводим guild_id в строку
+        guild_str = str(guild_id)
+        current_vol = persistent_settings.get(guild_str, {}).get("volume", 1.0)
+        
+        # Оборачиваем звук в трансформатор громкости
+        source = discord.PCMVolumeTransformer(base_source, volume=current_vol)
         
         def after_playing(e):
             is_processing[guild_id] = False
@@ -441,17 +485,28 @@ async def playlist(ctx, *, query: str):
 
         playlist_title = data.get('title', 'Без названия')
 
-        if guild_id not in saved_playlists:
-            saved_playlists[guild_id] = []
+        # --- НАЧАЛО ЗАМЕНЫ ---
+        # JSON хранит ключи как строки, поэтому переводим guild_id в строку
+        guild_str = str(ctx.guild.id)
+        
+        if guild_str not in saved_playlists:
+            saved_playlists[guild_str] = []
             
-        saved_playlists[guild_id].append({
+        saved_playlists[guild_str].append({
             'title': playlist_title,
             'url': query,
             'query': original_query 
         })
         
-        if len(saved_playlists[guild_id]) > 10:
-            saved_playlists[guild_id].pop(0) 
+        # Оставляем только 10 последних
+        if len(saved_playlists[guild_str]) > 10:
+            saved_playlists[guild_str].pop(0) 
+
+        # Сразу сохраняем обновленный список в файл!
+        save_playlists(saved_playlists)
+        # --- КОНЕЦ ЗАМЕНЫ ---
+
+        # ---> МАГИЯ: Запускаем фоновую подгрузку... (и дальше как было)
 
         # ---> МАГИЯ: Запускаем фоновую подгрузку для первых 15 треков <---
         # Берем только те треки, которые мы только что добавили
@@ -666,6 +721,31 @@ async def loop(ctx):
     
     state = "✅ **Включен**" if loop_mode[guild_id] else "❌ **Выключен**"
     await ctx.send(embed=discord.Embed(description=f"🔁 Бесконечный повтор очереди: {state}", color=discord.Color.blue()))
+    
+@bot.command(aliases=['vol'])
+async def volume(ctx, vol: int):
+    """Изменяет громкость бота (от 0 до 200%)."""
+    if vol < 0 or vol > 200:
+        return await ctx.send(embed=discord.Embed(description="❌ Громкость должна быть от 0 до 200!", color=discord.Color.red()))
+
+    guild_str = str(ctx.guild.id)
+    
+    # Если сервера еще нет в настройках - создаем
+    if guild_str not in persistent_settings:
+        persistent_settings[guild_str] = {}
+
+    # Дискорд принимает громкость от 0.0 до 2.0 (где 1.0 - это 100%)
+    volume_float = vol / 100.0
+    
+    # Сохраняем в наш словарь и сразу записываем в файл
+    persistent_settings[guild_str]["volume"] = volume_float
+    save_settings(persistent_settings)
+
+    # Если бот прямо сейчас что-то играет, меняем громкость на лету!
+    if ctx.voice_client and ctx.voice_client.source:
+        ctx.voice_client.source.volume = volume_float
+
+    await ctx.send(embed=discord.Embed(description=f"🔊 **Громкость установлена на {vol}%**\n*(Настройка сохранена навсегда)*", color=discord.Color.blue()))
 
 # --- ЗАПУСК ---
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')

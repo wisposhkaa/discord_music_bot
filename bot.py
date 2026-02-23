@@ -167,7 +167,6 @@ class PlaybackView(discord.ui.View):
 
     @discord.ui.button(emoji="📋", style=discord.ButtonStyle.gray)
     async def queue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Вызываем логику команды !queue
         guild_id = self.ctx.guild.id
         playing_now = current_tracks.get(guild_id)
         queue_list = queues.get(guild_id, [])
@@ -178,9 +177,7 @@ class PlaybackView(discord.ui.View):
         view = QueueView(queue_list, playing_now, self.ctx)
         embed = view.create_embed()
         
-        # Отправляем очередь отдельным эфемерным сообщением (видимым только тебе)
-        # или обычным сообщением. Давай сделаем обычным, чтобы все видели.
-        await interaction.response.send_message(embed=embed, view=view if view.total_pages > 1 else None)
+        await interaction.response.send_message(embed=embed, view=view if view.total_pages > 1 else None, ephemeral=True)
 
 # --- 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def get_server_settings(guild_id):
@@ -583,50 +580,45 @@ async def help(ctx):
     await ctx.send(embed=embed)
 
 @bot.command(aliases=['artist', 'author'])
-async def play_author(ctx, name: str, count: int = 60):
-    """
-    Захват треков автора. 
-    Использование: !author "Имя Автора" 15
-    """
+async def play_author(ctx, *, query: str):
     if not ctx.message.author.voice:
-        await ctx.send(embed=discord.Embed(description="❌ Зайди в голосовой канал!", color=discord.Color.red()))
-        return
+        return await ctx.send(embed=discord.Embed(description="❌ Зайди в голосовой канал!", color=discord.Color.red()))
 
     if not ctx.voice_client:
         await ctx.message.author.voice.channel.connect()
 
-    # Ограничение, чтобы не перегружать сервер
+    # --- УМНЫЙ РАЗБОР ТЕКСТА ---
+    parts = query.strip().split()
+    # Проверяем, является ли последнее слово числом
+    if len(parts) > 1 and parts[-1].isdigit():
+        count = int(parts[-1])
+        name = " ".join(parts[:-1]) # Всё, кроме последнего слова, идет в имя
+    else:
+        count = 60 # По умолчанию качаем 60, как в старой версии
+        name = query # Всё введенное - это имя автора
+
     if count > 100:
         count = 100
-        await ctx.send("⚠️ Максимальное количество треков за один захват — 100. Установлено: 100.")
+        await ctx.send("⚠️ Максимум 100 треков за раз.", delete_after=5)
 
-    loading_embed = discord.Embed(
-        description=f"🤖 Запускаю поисковые дроны для: **{name}**\nЦель: собрать **{count}** треков...", 
+    message = await ctx.send(embed=discord.Embed(
+        description=f"🤖 Ищу: **{name}**\nЦель: **{count}** треков...", 
         color=discord.Color.orange()
-    )
-    message = await ctx.send(embed=loading_embed)
+    ))
 
     try:
         loop = asyncio.get_event_loop()
-        
-        # 1. ШАГ: Формируем поисковый запрос с динамическим числом
-        # scsearch{count}: — говорит yt-dlp найти именно столько результатов
+        # Ищем ровно {count} треков по имени {name}
         search_query = f"scsearch{count}:{name}"
         
-        YTDL_SEARCH_OPTS = {
-            'extract_flat': True,
-            'quiet': True,
-            'force_generic_extractor': False,
-        }
+        YTDL_SEARCH_OPTS = {'extract_flat': True, 'quiet': True, 'force_generic_extractor': False}
 
         with yt_dlp.YoutubeDL(YTDL_SEARCH_OPTS) as ydl:
             data = await loop.run_in_executor(None, lambda: ydl.extract_info(search_query, download=False))
 
         if not data or 'entries' not in data or len(data['entries']) == 0:
-            await message.edit(embed=discord.Embed(description=f"❌ SoundCloud ничего не выдал по запросу: {name}", color=discord.Color.red()))
-            return
+            return await message.edit(embed=discord.Embed(description=f"❌ Ничего не найдено по запросу: {name}", color=discord.Color.red()))
 
-        # 2. ШАГ: Массовое добавление в очередь
         guild_id = ctx.guild.id
         if guild_id not in queues: queues[guild_id] = []
 
@@ -634,18 +626,13 @@ async def play_author(ctx, name: str, count: int = 60):
         new_tracks = []
         for entry in data['entries']:
             if not entry: continue
-            
             t_url = entry.get('url') or entry.get('webpage_url')
             if t_url:
-                track_data = {
-                    'url': t_url,
-                    'title': entry.get('title', 'Трек SoundCloud')
-                }
+                track_data = {'url': t_url, 'title': entry.get('title', 'Трек SoundCloud')}
                 queues[guild_id].append(track_data)
                 new_tracks.append(track_data)
                 added_count += 1
 
-        # Запускаем фоновую подгрузку названий для добавленных треков
         bot.loop.create_task(fetch_missing_titles(new_tracks))
 
         await message.edit(embed=discord.Embed(
@@ -653,13 +640,12 @@ async def play_author(ctx, name: str, count: int = 60):
             color=discord.Color.green()
         ))
 
-        # 3. ШАГ: Запуск воспроизведения
         if not ctx.voice_client.is_playing() and not is_processing.get(guild_id):
             await play_next(ctx)
 
     except Exception as e:
-        print(f"КРИТИЧЕСКАЯ ОШИБКА В AUTHOR: {e}")
-        await message.edit(embed=discord.Embed(description="❌ Произошел сбой при поиске автора.", color=discord.Color.red()))
+        print(f"Ошибка AUTHOR: {e}")
+        await message.edit(embed=discord.Embed(description="❌ Произошел сбой.", color=discord.Color.red()))
 
 # --- ЗАПУСК ---
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')

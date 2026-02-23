@@ -750,7 +750,7 @@ async def volume(ctx, vol: int):
     if ctx.voice_client and ctx.voice_client.source:
         ctx.voice_client.source.volume = volume_float
 
-    await ctx.send(embed=discord.Embed(description=f"🔊 **Громкость установлена на {vol}%**\n*(Настройка сохранена навсегда)*", color=discord.Color.blue()))
+    await ctx.send(embed=discord.Embed(description=f"🔊 **Громкость установлена на {vol}%**", color=discord.Color.blue()))
 
 # --- ЗАПУСК ---
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')

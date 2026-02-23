@@ -213,7 +213,12 @@ class PlaybackView(discord.ui.View):
         view = QueueView(queue_list, playing_now, self.ctx)
         embed = view.create_embed()
         
-        await interaction.response.send_message(embed=embed, view=view if view.total_pages > 1 else None, ephemeral=True)
+        # Если страниц больше одной — прикрепляем кнопки перелистывания
+        if view.total_pages > 1:
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        # Если страница всего одна — отправляем просто текст, вообще не упоминая view
+        else:
+            await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # --- 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def get_server_settings(guild_id):

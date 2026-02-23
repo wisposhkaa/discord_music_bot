@@ -564,13 +564,46 @@ async def clear(ctx):
         await ctx.send(embed=discord.Embed(description="Очередь и так пуста.", color=discord.Color.orange()))
 
 @bot.command(aliases=['skip'])
-async def next(ctx):
-    if ctx.voice_client and ctx.voice_client.is_playing():
+async def next(ctx, count: int = 1):
+    """Пропускает текущий трек или сразу несколько (например: !skip 5)"""
+    if count < 1:
+        return await ctx.send(embed=discord.Embed(description="❌ Число должно быть 1 или больше!", color=discord.Color.red()))
+
+    guild_id = ctx.guild.id
+
+    # Проверяем, играет ли что-то прямо сейчас (или стоит на паузе)
+    if ctx.voice_client and (ctx.voice_client.is_playing() or ctx.voice_client.is_paused()):
+        
+        # Если просят пропустить больше 1 трека, убираем их из очереди
+        if count > 1 and guild_id in queues:
+            # Считаем, сколько треков удалить из начала очереди
+            # Вычитаем 1, так как текущий играющий трек мы пропустим просто остановив плеер
+            to_skip = min(count - 1, len(queues[guild_id]))
+            
+            for _ in range(to_skip):
+                skipped_track = queues[guild_id].pop(0)
+                
+                # Сохраняем пропущенные треки в историю
+                if guild_id not in history_queues: 
+                    history_queues[guild_id] = []
+                history_queues[guild_id].append(skipped_track)
+                if len(history_queues[guild_id]) > 50: 
+                    history_queues[guild_id].pop(0)
+                
+                # Если включен повтор очереди (loop_mode), отправляем их в конец списка
+                if loop_mode.get(guild_id, True):
+                    queues[guild_id].append(skipped_track)
+
+        # Останавливаем текущий трек. Это автоматически вызовет функцию play_next 
+        # и бот начнет играть уже нужный трек
         ctx.voice_client.stop()
-        await ctx.send(embed=discord.Embed(description="⏭️ **Трек пропущен!**", color=discord.Color.blue()))
+        
+        # Выбираем правильный текст для сообщения
+        text = "⏭️ **Трек пропущен!**" if count == 1 else f"⏭️ **Пропущено треков: {count}**"
+        await ctx.send(embed=discord.Embed(description=text, color=discord.Color.blue()))
+        
     else:
         await ctx.send(embed=discord.Embed(description="В данный момент ничего не играет.", color=discord.Color.orange()))
-
 @bot.command(aliases=['queue', 'q'])
 async def query(ctx):
     guild_id = ctx.guild.id

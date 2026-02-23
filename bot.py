@@ -578,12 +578,16 @@ async def help(ctx):
     embed.add_field(name="📋 Очередь", value="`!queue` — Показать список\n`!next` — Следующая песня\n`!shuffle` — Перемешать", inline=False)
     embed.add_field(name="⏳ Перемотка", value="`!forward <сек>` (или `!ff`) — Вперед\n`!backwards <сек>` (или `!rw`) — Назад", inline=False)
     embed.add_field(name="📜 Плейлисты", value="`!playlist <ссылка>` — Добавить весь плейлист из SoundCloud", inline=False)
+    embed.add_field(name="🎤 Авторы", value="`!author \"имя\" <кол-во>` — Захватить топ треков автора", inline=False)
     embed.set_footer(text="Приятного прослушивания! 🎧")
     await ctx.send(embed=embed)
 
 @bot.command(aliases=['artist', 'author'])
-async def play_author(ctx, *, query: str):
-    """Метод 'Поисковый захват': самый надежный способ вытащить дискографию."""
+async def play_author(ctx, name: str, count: int = 60):
+    """
+    Захват треков автора. 
+    Использование: !author "Имя Автора" 15
+    """
     if not ctx.message.author.voice:
         await ctx.send(embed=discord.Embed(description="❌ Зайди в голосовой канал!", color=discord.Color.red()))
         return
@@ -591,65 +595,70 @@ async def play_author(ctx, *, query: str):
     if not ctx.voice_client:
         await ctx.message.author.voice.channel.connect()
 
-    loading_embed = discord.Embed(description=f"🤖 Запускаю поисковые дроны для: **{query}**...", color=discord.Color.orange())
+    # Ограничение, чтобы не перегружать сервер
+    if count > 100:
+        count = 100
+        await ctx.send("⚠️ Максимальное количество треков за один захват — 100. Установлено: 100.")
+
+    loading_embed = discord.Embed(
+        description=f"🤖 Запускаю поисковые дроны для: **{name}**\nЦель: собрать **{count}** треков...", 
+        color=discord.Color.orange()
+    )
     message = await ctx.send(embed=loading_embed)
 
     try:
         loop = asyncio.get_event_loop()
         
-        # 1. ШАГ: Извлекаем чистое имя автора
-        search_term = query
-        if "soundcloud.com/" in query:
-            # Если дали ссылку, вырезаем никнейм (это слово после soundcloud.com/)
-            parts = query.split('soundcloud.com/')[-1].split('/')
-            if len(parts) > 0:
-                search_term = parts[0] # Например: noizemcmc
-
-        # 2. ШАГ: Делаем мощный поиск (берем 60 самых популярных треков)
-        # scsearch60: — это внутренний механизм yt-dlp, который SoundCloud не может заблокировать так просто
-        search_query = f"scsearch60:{search_term}"
+        # 1. ШАГ: Формируем поисковый запрос с динамическим числом
+        # scsearch{count}: — говорит yt-dlp найти именно столько результатов
+        search_query = f"scsearch{count}:{name}"
         
         YTDL_SEARCH_OPTS = {
             'extract_flat': True,
             'quiet': True,
-            'force_generic_extractor': False, # Даем yt-dlp использовать свои наработки для SC
+            'force_generic_extractor': False,
         }
 
         with yt_dlp.YoutubeDL(YTDL_SEARCH_OPTS) as ydl:
             data = await loop.run_in_executor(None, lambda: ydl.extract_info(search_query, download=False))
 
         if not data or 'entries' not in data or len(data['entries']) == 0:
-            await message.edit(embed=discord.Embed(description="❌ SoundCloud ничего не выдал по этому запросу.", color=discord.Color.red()))
+            await message.edit(embed=discord.Embed(description=f"❌ SoundCloud ничего не выдал по запросу: {name}", color=discord.Color.red()))
             return
 
-        # 3. ШАГ: Массовое добавление в очередь
+        # 2. ШАГ: Массовое добавление в очередь
         guild_id = ctx.guild.id
         if guild_id not in queues: queues[guild_id] = []
 
         added_count = 0
+        new_tracks = []
         for entry in data['entries']:
             if not entry: continue
             
-            # В поиске yt-dlp всегда выдает хорошие прямые ссылки
             t_url = entry.get('url') or entry.get('webpage_url')
             if t_url:
-                queues[guild_id].append({
+                track_data = {
                     'url': t_url,
                     'title': entry.get('title', 'Трек SoundCloud')
-                })
+                }
+                queues[guild_id].append(track_data)
+                new_tracks.append(track_data)
                 added_count += 1
 
+        # Запускаем фоновую подгрузку названий для добавленных треков
+        bot.loop.create_task(fetch_missing_titles(new_tracks))
+
         await message.edit(embed=discord.Embed(
-            description=f"🔥 **{search_term}** захвачен!\nДобавлено в очередь: **{added_count}** самых популярных треков.", 
+            description=f"🔥 **{name}** захвачен!\nДобавлено в очередь: **{added_count}** треков.", 
             color=discord.Color.green()
         ))
 
-        # 4. ШАГ: Поехали!
+        # 3. ШАГ: Запуск воспроизведения
         if not ctx.voice_client.is_playing() and not is_processing.get(guild_id):
             await play_next(ctx)
 
     except Exception as e:
-        print(f"КРИТИЧЕСКАЯ ОШИБКА: {e}")
+        print(f"КРИТИЧЕСКАЯ ОШИБКА В AUTHOR: {e}")
         await message.edit(embed=discord.Embed(description="❌ Произошел сбой при поиске автора.", color=discord.Color.red()))
 
 # --- ЗАПУСК ---
